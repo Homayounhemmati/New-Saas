@@ -10,16 +10,16 @@
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 
 from . import dates
 from .config import TZ
 from .db import DEFAULT_CATEGORY
+from .taskparse import clean_category, parse_inline
 
 _HEADING = re.compile(r"^\s{0,3}(#{1,6})\s+(.*?)\s*#*\s*$")
 _ITEM = re.compile(r"^\s*(?:[-*+]|\d+[.)])\s+(?:\[([ xX])\]\s*)?(.+?)\s*$")
-_TAG = re.compile(r"#([^\s#]+)")
 _TIME = re.compile(
     r"(?<![\d/])(?:ساعت\s*(\d{1,2})(?::([0-5]\d))?|(\d{1,2}):([0-5]\d))"
     r"(?:\s*[-–—]\s*\d{1,2}:[0-5]\d)?")
@@ -33,11 +33,10 @@ class PlanItem:
     due: datetime | None = None
     has_time: bool = False
     done: bool = False
-
-
-def clean_category(raw: str) -> str:
-    return re.sub(r"\s+", " ", raw.replace("_", " ").replace("‌", " ").strip(" :：-–—")).strip() \
-        or DEFAULT_CATEGORY
+    priority: int = 3
+    est_min: int | None = None
+    mentions: list = field(default_factory=list)
+    recur: str | None = None
 
 
 def _heading_day(text: str, level: int, base: datetime):
@@ -79,9 +78,9 @@ def parse(text: str, base: datetime | None = None) -> list[PlanItem]:
         done = (m[1] or "").lower() == "x"
         body = m[2]
 
-        tags = _TAG.findall(body)
-        item_cat = clean_category(tags[0]) if tags else (cat or DEFAULT_CATEGORY)
-        body = _TAG.sub(" ", body)
+        inline = parse_inline(body)
+        item_cat = inline.category or cat or DEFAULT_CATEGORY
+        body = inline.title
 
         item_day, body = dates.find_day(body, base, today_ok=True, short=False)
         the_day = item_day or day
@@ -107,5 +106,6 @@ def parse(text: str, base: datetime | None = None) -> list[PlanItem]:
             due = datetime(the_day.year, the_day.month, the_day.day,
                            hour if hour is not None else DEFAULT_HOUR,
                            minute if minute is not None else 0, tzinfo=TZ)
-        items.append(PlanItem(title, item_cat, due, hour is not None, done))
+        items.append(PlanItem(title, item_cat, due, hour is not None, done, inline.priority,
+                              inline.est_min, inline.mentions, inline.recur))
     return items

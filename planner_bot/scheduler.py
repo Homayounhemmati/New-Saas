@@ -7,27 +7,18 @@ from datetime import timedelta
 
 from aiogram import Bot
 
-from . import dates, texts
-from .db import DB
+from . import dates, notify, texts
+from .db import DB, PERSONAL
 from .keyboards import list_kb, task_kb
 
 log = logging.getLogger(__name__)
 
 
-async def _safe_send(bot: Bot, chat_id: int, *args, **kwargs):
-    try:
-        await bot.send_message(chat_id, *args, **kwargs)
-        return True
-    except Exception:  # کاربر ربات را بلاک کرده و …
-        log.exception("send failed to %s", chat_id)
-        return False
-
-
 async def send_reminders(bot: Bot, db: DB):
     for t in await db.due_unnotified(int(time.time())):
         await db.mark_notified(t["id"])
-        await _safe_send(bot, t["user_id"], f"⏰ <b>یادآوری</b>\n{texts.task_line(t)}",
-                         parse_mode="HTML", reply_markup=task_kb(t["id"], snooze=True))
+        await notify.send(bot, t["assignee_id"], f"⏰ <b>یادآوری</b>\n{texts.task_line(t)}",
+                          task_kb(t["id"], snooze=True, team=t["ws_kind"] != PERSONAL))
 
 
 async def send_digests(bot: Bot, db: DB):
@@ -42,9 +33,11 @@ async def send_digests(bot: Bot, db: DB):
             todays = await db.tasks_between(uid, s, e)
             overdue = await db.overdue(uid, s)
             body = "\n".join(texts.task_line(t) for t in todays) or "برنامه‌ای برای امروز ثبت نشده."
+            load = texts.workload(todays)
+            body += f"\n\n{load}" if load else ""
             extra = (f"\n\n⚠️ عقب‌افتاده: {len(overdue)} کار (/today)" if overdue else "")
-            await _safe_send(bot, uid, f"🌅 <b>صبح بخیر! برنامه امروز — {dates.fmt_date(now)}</b>\n"
-                             f"{body}{extra}", parse_mode="HTML", reply_markup=list_kb(todays))
+            await notify.send(bot, uid, f"🌅 <b>صبح بخیر! برنامه امروز — {dates.fmt_date(now)}</b>\n"
+                             f"{body}{extra}", reply_markup=list_kb(todays))
         if hhmm >= u["evening"] and u["last_evening"] != today_key:
             await db.mark_digest(uid, "last_evening", today_key)
             s, e = texts.day_bounds(now)
@@ -56,7 +49,7 @@ async def send_digests(bot: Bot, db: DB):
                         + "\nبرای فردا جابجا کنید یا انجام‌شده بزنید.")
             else:
                 msg += "\n\nعالی بود! همه‌چیز انجام شد 🎉" if total else ""
-            await _safe_send(bot, uid, msg, parse_mode="HTML", reply_markup=list_kb(pending))
+            await notify.send(bot, uid, msg, reply_markup=list_kb(pending))
 
 
 async def run(bot: Bot, db: DB, interval: int = 20):

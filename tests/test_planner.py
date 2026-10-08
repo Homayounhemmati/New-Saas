@@ -35,14 +35,28 @@ def test_db_flow(tmp_path):
     async def go():
         db = DB(str(tmp_path / "t.db"))
         await db.open()
+        await db.ensure_user(1, "الف", "alef")
+        await db.ensure_user(2, "ب", "bee")
         now = int(time.time())
-        a = await db.add_task(1, "الف", now - 60)
-        await db.add_task(2, "ب", now - 60)
+        w1, w2 = await db.personal_ws(1), await db.personal_ws(2)
+        a = await db.add_task(1, w1, "الف", now - 60, assignee_id=1)
+        await db.add_task(2, w2, "ب", now - 60, assignee_id=2)
         assert {t["id"] for t in await db.due_unnotified(now)} >= {a}
-        assert not await db.complete(2, a)          # کاربر دیگر نمی‌تواند ببندد
-        assert await db.complete(1, a)
+        assert not await db.complete(2, a)          # کاربر دیگر به فضای شخصی من دسترسی ندارد
+        t, nxt = await db.complete(1, a)
+        assert t["id"] == a and nxt is None
         assert (await db.stats(1, now - 3600, now + 3600)) == (1, 1)
-        await db.reschedule(1, a, now + 600)
+        assert (await db.get_task(1, a))["list_name"].endswith("انجام شد")
+        await db.update_task(1, a, due_ts=now + 600)
         assert (await db.get_task(1, a))["notified"] == 0
         await db.close()
     asyncio.run(go())
+
+
+def test_recurring_next_due():
+    from planner_bot.db import next_due
+    ts = int(datetime(2026, 10, 8, 7, 0, tzinfo=TZ).timestamp())
+    assert datetime.fromtimestamp(next_due(ts, "daily"), TZ).day == 9
+    assert datetime.fromtimestamp(next_due(ts, "weekly"), TZ).day == 15
+    nxt = datetime.fromtimestamp(next_due(ts, "monthly"), TZ)
+    assert (nxt.month, nxt.day) == (11, 7)   # ۱۶ مهر ← ۱۶ آبان
