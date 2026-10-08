@@ -1,4 +1,6 @@
 """تبدیل متن فارسی (امروز، فردا ۱۸:۳۰، ۱۴۰۵/۰۸/۱۵ …) به زمان و نمایش تاریخ شمسی."""
+from __future__ import annotations
+
 import re
 from datetime import datetime, timedelta
 

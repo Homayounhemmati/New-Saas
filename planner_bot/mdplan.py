@@ -7,6 +7,8 @@
 - روز می‌تواند داخل خود آیتم هم بیاید: «- شنبه 09:00 جلسه».
 - آیتم بدون روز، بدون موعد ثبت می‌شود.
 """
+from __future__ import annotations
+
 import re
 from dataclasses import dataclass
 from datetime import datetime

@@ -4,7 +4,7 @@
 
 ## اجرا
 ```bash
-pip install -r requirements.txt
+pip install -r requirements.txt   # Python 3.9+
 cp .env.example .env   # BOT_TOKEN را از @BotFather بگذارید
 python -m planner_bot.main
 ```
