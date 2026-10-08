@@ -1,3 +1,4 @@
+import io
 import re
 import time
 from datetime import timedelta
@@ -6,11 +7,11 @@ from aiogram import F, Router
 from aiogram.filters import Command, CommandObject, CommandStart
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
-from aiogram.types import CallbackQuery, Message
+from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message
 
-from . import dates, texts
+from . import dates, mdplan, texts
 from .config import DEFAULT_EVENING, DEFAULT_MORNING
-from .db import DB
+from .db import DB, DEFAULT_CATEGORY
 from .keyboards import MAIN_MENU, list_kb, task_kb
 
 router = Router()
@@ -22,8 +23,37 @@ class AddTask(StatesGroup):
     when = State()
 
 
+class ImportPlan(StatesGroup):
+    wait = State()
+    confirm = State()
+
+
+MAX_IMPORT_BYTES = 200_000
+_TAG = re.compile(r"#([^\s#]+)")
+
+
+def _cat_arg(command: CommandObject | None) -> str | None:
+    if command is None or not command.args:
+        return None
+    return mdplan.clean_category(command.args.lstrip("#"))
+
+
+def split_category(title: str) -> tuple[str, str]:
+    """«دویدن #ورزش» → («دویدن»، «ورزش»)."""
+    m = _TAG.search(title)
+    if not m:
+        return title.strip(), DEFAULT_CATEGORY
+    return _TAG.sub(" ", title).strip(), mdplan.clean_category(m[1])
+
+
 async def _ensure(msg: Message):
     await db.ensure_user(msg.from_user.id, DEFAULT_MORNING, DEFAULT_EVENING)
+
+
+@router.message(Command("cancel"))
+async def cancel(msg: Message, state: FSMContext):
+    await state.clear()
+    await msg.answer("لغو شد.")
 
 
 @router.message(CommandStart())
@@ -46,8 +76,13 @@ async def _create(msg: Message, title: str, when_text: str | None):
                              "یا «-» برای بدون زمان.")
             return False
         due = int(dt.timestamp())
-    tid = await db.add_task(msg.from_user.id, title, due)
-    await msg.answer(f"ثبت شد ✔️\n▫️ <b>{tid}</b>. {texts._esc(title)}\n🕒 {dates.fmt_dt(due)}",
+    title, category = split_category(title)
+    if not title:
+        await msg.answer("عنوان کار خالی است.")
+        return True
+    tid = await db.add_task(msg.from_user.id, title, due, category)
+    await msg.answer(f"ثبت شد ✔️\n▫️ <b>{tid}</b>. {texts._esc(title)}\n"
+                     f"🏷 {texts._esc(category)}\n🕒 {dates.fmt_dt(due)}",
                      parse_mode="HTML", reply_markup=task_kb(tid))
     return True
 
@@ -71,14 +106,14 @@ async def add_btn(msg: Message, state: FSMContext):
     await msg.answer("عنوان کار چیست؟")
 
 
-@router.message(AddTask.title, F.text)
+@router.message(AddTask.title, F.text, ~F.text.startswith("/"))
 async def add_title(msg: Message, state: FSMContext):
     await state.update_data(title=msg.text.strip())
     await state.set_state(AddTask.when)
     await msg.answer("چه زمانی؟ (مثلاً «فردا 18:30»، «۲ ساعت دیگر»، یا «-» برای بدون زمان)")
 
 
-@router.message(AddTask.when, F.text)
+@router.message(AddTask.when, F.text, ~F.text.startswith("/"))
 async def add_when(msg: Message, state: FSMContext):
     title = (await state.get_data())["title"]
     if await _create(msg, title, msg.text):
@@ -87,48 +122,81 @@ async def add_when(msg: Message, state: FSMContext):
 
 async def _send_list(msg: Message, header: str, tasks):
     if not tasks:
-        await msg.answer(f"{header}\nچیزی نیست 🎉")
+        await msg.answer(f"{header}\nچیزی نیست 🎉", parse_mode="HTML")
         return
     await msg.answer(header + "\n" + "\n".join(texts.task_line(t) for t in tasks),
                      parse_mode="HTML", reply_markup=list_kb(tasks))
 
 
+def _cat_title(category: str | None) -> str:
+    return f" · 🏷 {texts._esc(category)}" if category else ""
+
+
 @router.message(Command("today"))
 @router.message(F.text == "📋 امروز")
-async def today(msg: Message):
+async def today(msg: Message, command: CommandObject | None = None):
     await _ensure(msg)
+    cat = _cat_arg(command)
     now = dates.now()
     s, e = texts.day_bounds(now)
-    overdue = await db.overdue(msg.from_user.id, s)
-    todays = await db.tasks_between(msg.from_user.id, s, e)
-    header = f"📋 <b>امروز — {dates.fmt_date(now)}</b>"
-    if overdue:
-        header += "\n⚠️ عقب‌افتاده:\n" + "\n".join(texts.task_line(t) for t in overdue) + "\n\nامروز:"
+    overdue = await db.overdue(msg.from_user.id, s, cat)
+    todays = await db.tasks_between(msg.from_user.id, s, e, cat)
+    header = f"📋 <b>امروز — {dates.fmt_date(now)}</b>{_cat_title(cat)}"
     await _send_list(msg, header, todays)
     if overdue:
-        await msg.answer("برای بستن عقب‌افتاده‌ها:", reply_markup=list_kb(overdue))
+        await msg.answer("⚠️ عقب‌افتاده:\n" + "\n".join(texts.task_line(t) for t in overdue),
+                         parse_mode="HTML", reply_markup=list_kb(overdue))
 
 
 @router.message(Command("week"))
 @router.message(F.text == "📆 هفته")
-async def week(msg: Message):
+async def week(msg: Message, command: CommandObject | None = None):
     await _ensure(msg)
+    cat = _cat_arg(command)
     now = dates.now()
     lines = []
     for i in range(7):
         day = now + timedelta(days=i)
         s, e = texts.day_bounds(day)
-        ts = await db.tasks_between(msg.from_user.id, s, e)
+        ts = await db.tasks_between(msg.from_user.id, s, e, cat)
         lines.append(f"\n<b>{dates.fmt_date(day)}</b>")
         lines += [texts.task_line(t) for t in ts] or ["— آزاد —"]
-    await msg.answer("📆 <b>برنامه ۷ روز آینده</b>" + "\n".join(lines), parse_mode="HTML")
+    await msg.answer(f"📆 <b>برنامه ۷ روز آینده</b>{_cat_title(cat)}" + "\n".join(lines),
+                     parse_mode="HTML")
 
 
 @router.message(Command("all"))
-async def all_(msg: Message):
+async def all_(msg: Message, command: CommandObject | None = None):
     await _ensure(msg)
-    tasks = await db.open_tasks(msg.from_user.id)
-    await _send_list(msg, "🗂 <b>همه کارهای باز</b>", tasks)
+    cat = _cat_arg(command)
+    tasks = await db.open_tasks(msg.from_user.id, cat)
+    await _send_list(msg, f"🗂 <b>همه کارهای باز</b>{_cat_title(cat)}", tasks)
+
+
+@router.message(Command("cats"))
+async def cats(msg: Message):
+    await _ensure(msg)
+    rows = await db.categories(msg.from_user.id)
+    if not rows:
+        await msg.answer("هنوز دسته‌ای ندارید. با <code>/add عنوان #دسته</code> بسازید.",
+                         parse_mode="HTML")
+        return
+    await msg.answer("🏷 <b>دسته‌ها</b>\n" + "\n".join(
+        f"{r['emoji']} {texts._esc(r['name'])} — {r['open_count']} کار باز" for r in rows),
+        parse_mode="HTML")
+
+
+@router.message(Command("cat"))
+async def cat_cmd(msg: Message, command: CommandObject):
+    await _ensure(msg)
+    parts = (command.args or "").split()
+    if not parts:
+        await msg.answer("فرمت: <code>/cat ورزش 💪</code>", parse_mode="HTML")
+        return
+    emoji = parts[-1] if len(parts) > 1 and not parts[-1].isalnum() else None
+    name = mdplan.clean_category(" ".join(parts[:-1] if emoji else parts).lstrip("#"))
+    await db.set_category(msg.from_user.id, name, emoji)
+    await msg.answer(f"دسته «{texts._esc(name)}» {emoji or ''} آماده است ✔️")
 
 
 @router.message(Command("stats"))
@@ -138,14 +206,116 @@ async def stats(msg: Message):
     now = dates.now()
     s_today, e_today = texts.day_bounds(now)
     s_week = texts.day_bounds(now - timedelta(days=6))[0]
-    td, tdd = await db.stats(msg.from_user.id, s_today, e_today)
-    tw, twd = await db.stats(msg.from_user.id, s_week, e_today)
-    st = texts.streak(await db.done_days(msg.from_user.id), now)
+    uid = msg.from_user.id
+    td, tdd = await db.stats(uid, s_today, e_today)
+    tw, twd = await db.stats(uid, s_week, e_today)
+    st = texts.streak(await db.done_days(uid), now)
+    emoji = {r["name"]: r["emoji"] for r in await db.categories(uid)}
+    by_cat = "\n".join(
+        f"{emoji.get(r['category'], '📌')} {texts._esc(r['category'])}: "
+        f"{r['done']}/{r['total']}  {texts.progress_bar(r['done'], r['total'])}"
+        for r in await db.stats_by_category(uid, s_week, e_today))
     await msg.answer(
         "📊 <b>آمار شما</b>\n"
         f"امروز: {tdd}/{td}\n{texts.progress_bar(tdd, td)}\n\n"
         f"۷ روز اخیر: {twd}/{tw}\n{texts.progress_bar(twd, tw)}\n\n"
-        f"🔥 روزهای متوالی فعال: {st}", parse_mode="HTML")
+        + (f"<b>به تفکیک دسته</b>\n{by_cat}\n\n" if by_cat else "")
+        + f"🔥 روزهای متوالی فعال: {st}", parse_mode="HTML")
+
+
+# ---------- ورود برنامه مارک‌داون ----------
+IMPORT_PROMPT = ("برنامه هفته را به‌صورت متن مارک‌داون بفرستید (یا فایل .md/.txt آپلود کنید).\n\n"
+                 "<pre>## شنبه\n- [ ] 07:00 ورزش #ورزش\n- 09:00 کار عمیق #کار\n"
+                 "## یکشنبه\n- 18:30 جلسه تیم #کار</pre>\n"
+                 "عنوان‌ها = روز، #هشتگ = دسته، ساعت اختیاری است. /cancel برای انصراف.")
+
+
+@router.message(Command("import"))
+async def import_cmd(msg: Message, command: CommandObject, state: FSMContext):
+    await _ensure(msg)
+    if command.args:
+        await _preview(msg, state, command.args)
+        return
+    await state.set_state(ImportPlan.wait)
+    await msg.answer(IMPORT_PROMPT, parse_mode="HTML")
+
+
+@router.message(ImportPlan.wait, F.document)
+async def import_file(msg: Message, state: FSMContext):
+    doc = msg.document
+    if (doc.file_size or 0) > MAX_IMPORT_BYTES:
+        await msg.answer("فایل خیلی بزرگ است (حداکثر ۲۰۰ کیلوبایت).")
+        return
+    buf = io.BytesIO()
+    await msg.bot.download(doc, destination=buf)
+    try:
+        text = buf.getvalue().decode("utf-8-sig")
+    except UnicodeDecodeError:
+        await msg.answer("فایل باید متنی با کدگذاری UTF-8 باشد.")
+        return
+    await _preview(msg, state, text)
+
+
+@router.message(ImportPlan.wait, F.text, ~F.text.startswith("/"))
+async def import_text(msg: Message, state: FSMContext):
+    await _preview(msg, state, msg.text)
+
+
+async def _preview(msg: Message, state: FSMContext, text: str):
+    items = mdplan.parse(text)
+    if not items:
+        await msg.answer("هیچ کاری پیدا نکردم 🤔 آیتم‌ها باید با «- » شروع شوند. /import را دوباره بزنید.")
+        await state.clear()
+        return
+    await state.set_state(ImportPlan.confirm)
+    await state.update_data(items=[
+        {"title": i.title, "category": i.category, "has_time": i.has_time, "done": i.done,
+         "due_ts": int(i.due.timestamp()) if i.due else None} for i in items])
+    undated = sum(1 for i in items if i.due is None)
+    shown = []
+    for i in items[:40]:
+        when = dates.fmt_dt(int(i.due.timestamp())) if i.due else "بدون زمان"
+        if i.due and not i.has_time:
+            when = dates.fmt_date(i.due)
+        shown.append(f"{'✅' if i.done else '▫️'} {texts._esc(i.title)} — {when} · #"
+                     + texts._esc(i.category.replace(" ", "_")))
+    more = f"\n… و {len(items) - 40} مورد دیگر" if len(items) > 40 else ""
+    await msg.answer(
+        f"📥 <b>{len(items)} کار پیدا شد</b>" + (f" ({undated} تا بدون زمان)" if undated else "")
+        + "\n\n" + "\n".join(shown) + more,
+        parse_mode="HTML",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[[
+            InlineKeyboardButton(text="✅ ثبت همه", callback_data="imp:ok"),
+            InlineKeyboardButton(text="❌ لغو", callback_data="imp:no")]]))
+
+
+@router.callback_query(ImportPlan.confirm, F.data == "imp:ok")
+async def import_ok(cb: CallbackQuery, state: FSMContext):
+    items = (await state.get_data()).get("items", [])
+    await state.clear()
+    uid, now_ts = cb.from_user.id, int(time.time())
+    added = skipped = 0
+    for i in items:
+        if await db.exists(uid, i["title"], i["due_ts"]):
+            skipped += 1
+            continue
+        notify = bool(i["has_time"] and i["due_ts"] and i["due_ts"] > now_ts and not i["done"])
+        tid = await db.add_task(uid, i["title"], i["due_ts"], i["category"], notify)
+        if i["done"]:
+            await db.complete(uid, tid)
+        added += 1
+    await cb.answer("ثبت شد")
+    await cb.message.edit_reply_markup(reply_markup=None)
+    await cb.message.answer(
+        f"✔️ {added} کار ثبت شد" + (f" ({skipped} مورد تکراری رد شد)" if skipped else "")
+        + "\nبرای دیدن: /week")
+
+
+@router.callback_query(ImportPlan.confirm, F.data == "imp:no")
+async def import_no(cb: CallbackQuery, state: FSMContext):
+    await state.clear()
+    await cb.answer("لغو شد")
+    await cb.message.edit_reply_markup(reply_markup=None)
 
 
 def _set_time_cmd(field: str, label: str):

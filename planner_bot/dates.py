@@ -41,6 +41,42 @@ def _time_of(text: str):
     return h, mi
 
 
+def _find_day(t: str, base: datetime, today_ok: bool = False, short: bool = True):
+    """روز را در متن پیدا می‌کند: (تاریخ یا None، متن بدون عبارت روز). ممکن است ValueError بدهد."""
+    jy = jdatetime.date.fromgregorian(date=base.date()).year
+    m = re.search(r"(\d{4})[/-](\d{1,2})[/-](\d{1,2})", t)
+    if m:
+        return jdatetime.date(int(m[1]), int(m[2]), int(m[3])).togregorian(), t.replace(m[0], " ")
+    m = re.search(r"(?<!\d)(\d{1,2})\s*(%s)(?![\u0600-\u06FF])" % "|".join(MONTHS), t)
+    if m:
+        d = jdatetime.date(jy, MONTHS.index(m[2]) + 1, int(m[1])).togregorian()
+        return d, t.replace(m[0], " ")
+    if short:
+        m = re.search(r"(?<!\d)(\d{1,2})[/-](\d{1,2})(?![\d:])", t)
+        if m:
+            return jdatetime.date(jy, int(m[1]), int(m[2])).togregorian(), t.replace(m[0], " ")
+    for token, ahead in (("پس‌فردا", 2), ("پس فردا", 2), ("فردا", 1), ("امروز", 0), ("امشب", 0)):
+        if token in t:
+            return (base + timedelta(days=ahead)).date(), t.replace(token, " ")
+    for name in sorted(WEEKDAYS, key=len, reverse=True):
+        if name in t:
+            ahead = (WEEKDAYS[name] - base.weekday()) % 7
+            if ahead == 0 and not today_ok:
+                ahead = 7
+            return (base + timedelta(days=ahead)).date(), t.replace(name, " ")
+    return None, t
+
+
+def find_day(text: str, base: datetime | None = None, today_ok: bool = False, short: bool = True):
+    """نسخه امن _find_day؛ برای تاریخ نامعتبر (None، متن) برمی‌گرداند."""
+    base = base or now()
+    text = normalize(text)
+    try:
+        return _find_day(text, base, today_ok, short)
+    except ValueError:
+        return None, text
+
+
 def parse_when(text: str, base: datetime | None = None) -> datetime | None:
     """زمان را برمی‌گرداند یا None اگر قابل فهم نبود."""
     base = base or now()
@@ -53,34 +89,10 @@ def parse_when(text: str, base: datetime | None = None) -> datetime | None:
         delta = timedelta(hours=n) if m.group(2) == "ساعت" else timedelta(minutes=n)
         return (base + delta).replace(second=0, microsecond=0)
 
-    # تاریخ شمسی: ۱۴۰۵/۰۸/۱۵ یا ۰۸/۱۵
-    day = None
-    m = re.search(r"(\d{4})[/-](\d{1,2})[/-](\d{1,2})", t)
-    m2 = re.search(r"(?<!\d)(\d{1,2})[/-](\d{1,2})(?![\d:])", t)
     try:
-        if m:
-            g = jdatetime.date(int(m[1]), int(m[2]), int(m[3])).togregorian()
-            day, t = g, t.replace(m[0], " ")
-        elif m2:
-            jy = jdatetime.date.fromgregorian(date=base.date()).year
-            g = jdatetime.date(jy, int(m2[1]), int(m2[2])).togregorian()
-            day, t = g, t.replace(m2[0], " ")
+        day, t = _find_day(t, base)
     except ValueError:
         return None
-
-    if day is None:
-        if "پس‌فردا" in t or "پس فردا" in t:
-            day = (base + timedelta(days=2)).date()
-        elif "فردا" in t:
-            day = (base + timedelta(days=1)).date()
-        elif "امروز" in t or "امشب" in t:
-            day = base.date()
-        else:
-            for name in sorted(WEEKDAYS, key=len, reverse=True):
-                if name in t:
-                    ahead = (WEEKDAYS[name] - base.weekday()) % 7 or 7
-                    day = (base + timedelta(days=ahead)).date()
-                    break
 
     tm = _time_of(t)
     if day is None and tm is None:

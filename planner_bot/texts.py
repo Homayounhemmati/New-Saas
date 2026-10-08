@@ -12,6 +12,10 @@ HELP = """سلام! من ربات برنامه‌ریزی شمایم 🗓
 📆 /week — برنامه ۷ روز آینده
 🗂 /all — همه کارهای باز
 📊 /stats — آمار و پیشرفت هفته
+🏷 /cats — دسته‌ها · /cat ورزش 💪 — ساخت/ایموجی دسته
+   فیلتر با دسته: <code>/today ورزش</code> · <code>/week کار</code> · <code>/all شخصی</code>
+   دسته هنگام افزودن: <code>/add دویدن #ورزش | فردا 7</code>
+📥 /import — ثبت برنامه هفته از متن یا فایل مارک‌داون
 ⏰ /morning 07:30 — ساعت برنامه صبحگاهی
 🌙 /evening 21:00 — ساعت مرور شبانه
 """
@@ -25,7 +29,8 @@ def day_bounds(day: datetime) -> tuple[int, int]:
 def task_line(t) -> str:
     mark = "✅" if t["done_ts"] else "▫️"
     when = f" — {datetime.fromtimestamp(t['due_ts'], TZ):%H:%M}" if t["due_ts"] else ""
-    return f"{mark} <b>{t['id']}</b>. {_esc(t['title'])}{when}"
+    cat = "" if t["category"] == "عمومی" else f" #{_esc(t['category'].replace(' ', '_'))}"
+    return f"{mark} <b>{t['id']}</b>. {_esc(t['title'])}{when}{cat}"
 
 
 def _esc(s: str) -> str:
